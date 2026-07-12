@@ -1,0 +1,7 @@
+/bin/
+/ec.pem
+*.pem
+.env
+.env.local
+*.log
+/tmp/
