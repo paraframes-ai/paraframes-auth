@@ -1,0 +1,279 @@
+openapi: 3.1.0
+info:
+  title: Paraframes Auth & Identity API
+  version: "1.0.0"
+  description: >
+    Authentication and identity platform for the Paraframes iOS, macOS, and web
+    apps. Supports email/password, Sign in with Apple, Google OAuth, and
+    passkeys (WebAuthn, beta-gated). Issues ES256 access tokens (verifiable via
+    the published JWKS) and rotating refresh tokens with reuse detection.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds }
+        refresh_token: { type: string }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        email_verified: { type: boolean }
+        display_name: { type: string }
+        is_beta_tester: { type: boolean }
+        created_at: { type: string, format: date-time }
+    AuthResult:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        tokens: { $ref: "#/components/schemas/TokenPair" }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses: { "200": { description: OK } }
+  /readyz:
+    get:
+      summary: Readiness probe (checks database)
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+  /.well-known/jwks.json:
+    get:
+      summary: JSON Web Key Set for verifying access tokens
+      responses: { "200": { description: JWKS document } }
+
+  /v1/auth/register:
+    post:
+      summary: Register with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 10 }
+                display_name: { type: string }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "409": { description: Email already registered, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /v1/auth/login:
+    post:
+      summary: Log in with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "401": { description: Invalid credentials }
+
+  /v1/auth/token/refresh:
+    post:
+      summary: Rotate a refresh token
+      description: >
+        Exchanges a refresh token for a new access + refresh token pair. The
+        presented token is revoked. Replaying a previously rotated token is
+        treated as compromise and revokes the entire session family.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200": { description: New tokens }
+        "401": { description: Invalid or reused token }
+
+  /v1/auth/logout:
+    post:
+      summary: Revoke the session behind a refresh token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { refresh_token: { type: string } }
+      responses: { "204": { description: Logged out } }
+
+  /v1/auth/email/verify:
+    post:
+      summary: Verify an email address with a token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } }
+      responses: { "200": { description: Verified }, "401": { description: Invalid token } }
+
+  /v1/auth/email/resend:
+    post:
+      summary: Resend the verification email
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { email: { type: string } } } } }
+      responses: { "202": { description: Sent if the account exists } }
+
+  /v1/auth/password/forgot:
+    post:
+      summary: Request a password-reset email
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { email: { type: string } } } } }
+      responses: { "202": { description: Sent if the account exists } }
+
+  /v1/auth/password/reset:
+    post:
+      summary: Reset a password using a reset token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [token, new_password], properties: { token: { type: string }, new_password: { type: string } } } } }
+      responses: { "200": { description: Reset }, "401": { description: Invalid token } }
+
+  /v1/auth/password/change:
+    post:
+      summary: Change the current user's password
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [current_password, new_password], properties: { current_password: { type: string }, new_password: { type: string } } } } }
+      responses: { "200": { description: Changed }, "401": { description: Wrong current password } }
+
+  /v1/auth/oauth/google:
+    post:
+      summary: Sign in with a Google ID token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [id_token], properties: { id_token: { type: string }, display_name: { type: string } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "401": { description: Invalid ID token }
+        "403": { description: Provider not enabled }
+
+  /v1/auth/oauth/apple:
+    post:
+      summary: Sign in with an Apple identity token
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [id_token], properties: { id_token: { type: string }, display_name: { type: string } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "401": { description: Invalid identity token }
+        "403": { description: Provider not enabled }
+
+  /v1/auth/passkeys/register/begin:
+    post:
+      summary: Begin passkey registration (beta testers only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: WebAuthn creation options + challenge_id }
+        "403": { description: Not a beta tester }
+
+  /v1/auth/passkeys/register/finish:
+    post:
+      summary: Complete passkey registration (beta testers only)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [challenge_id, credential], properties: { challenge_id: { type: string }, name: { type: string }, credential: { type: object } } } } }
+      responses: { "201": { description: Passkey registered } }
+
+  /v1/auth/passkeys/login/begin:
+    post:
+      summary: Begin passkey login
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { email: { type: string } } } } }
+      responses: { "200": { description: WebAuthn assertion options + challenge_id } }
+
+  /v1/auth/passkeys/login/finish:
+    post:
+      summary: Complete passkey login
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [challenge_id, credential], properties: { challenge_id: { type: string }, credential: { type: object } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResult" } } } }
+        "401": { description: Invalid assertion }
+
+  /v1/me:
+    get:
+      summary: Get the current user's profile
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { description: User, content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } } }
+    patch:
+      summary: Update the current user's profile
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { display_name: { type: string } } } } }
+      responses: { "200": { description: Updated user } }
+
+  /v1/sessions:
+    get:
+      summary: List active sessions
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { description: Sessions } }
+    delete:
+      summary: Revoke all other sessions (keep the current one)
+      security: [{ bearerAuth: [] }]
+      responses: { "204": { description: Done } }
+
+  /v1/sessions/{id}:
+    delete:
+      summary: Revoke a specific session
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: Revoked }, "404": { description: Not found } }
+
+  /v1/beta/enroll:
+    post:
+      summary: Enroll as a beta tester (unlocks passkeys)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } }
+      responses: { "200": { description: Enrolled }, "403": { description: Invalid code } }
+
+  /v1/passkeys:
+    get:
+      summary: List the current user's passkeys
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { description: Passkeys } }
+
+  /v1/passkeys/{id}:
+    delete:
+      summary: Delete a passkey
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: Deleted }, "404": { description: Not found } }
